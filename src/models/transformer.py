@@ -106,8 +106,8 @@ class Predictor(nn.Module):
     def __init__(
         self,
         num_tokens,
-        embed_dim=768,
-        predictor_embed_dim=384,
+        embed_dim=256,
+        predictor_embed_dim=768,
         depth=6,
         num_heads=12,
         mlp_ratio=4.0,
@@ -121,6 +121,8 @@ class Predictor(nn.Module):
         **kwargs
     ):
         super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
         self.predictor_embed = nn.Linear(embed_dim, predictor_embed_dim, bias=True)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, predictor_embed_dim))
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
@@ -195,11 +197,13 @@ class Predictor(nn.Module):
 
         return x
     
+
 class TextTransformer(nn.Module):
     """ Text Transformer """
     def __init__(
         self,
         vocab_size,
+        block_size,
         embed_dim=768,
         depth=12,
         num_heads=12,
@@ -220,7 +224,7 @@ class TextTransformer(nn.Module):
         self.token_embed = nn.Embedding(vocab_size, embed_dim)
         num_tokens = vocab_size
         # --
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, block_size, embed_dim))
         # --
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         self.blocks = nn.ModuleList([
@@ -256,16 +260,19 @@ class TextTransformer(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def forward(self, x, masks=None):
+        device = x.device
         if masks is not None:
             if not isinstance(masks, list):
                 masks = [masks]
 
         # -- embed x
         x = self.token_embed(x)
-        B, N, D = x.shape
+        B, N = x.shape
+
+        pos = torch.arange(0, N, dtype=torch.long, device=device) # shape (t)
 
         # -- add positional embedding to x
-        x = x + self.pos_embed[:N, :]
+        x = x + self.pos_embed
 
         # -- mask x
         if masks is not None:

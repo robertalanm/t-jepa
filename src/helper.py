@@ -69,13 +69,14 @@ def init_model(
     device,
     vocab_size=50_257,
     model_name='gpt_tiny',
-    num_tokens=512,
+    block_size=512,
 ):
     encoder = gpt.__dict__[model_name](
         vocab_size=vocab_size,
+        block_size=block_size,
     )
     predictor = gpt.__dict__['predictor'](
-        num_tokens=num_tokens)
+        num_tokens=block_size)
 
     def init_weights(m):
         if isinstance(m, torch.nn.Linear):

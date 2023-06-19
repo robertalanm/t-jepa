@@ -13,7 +13,7 @@ from src.helper import (
     init_model,
     init_opt)
 
-from src.datasets.text_dataset import make_text_dataset
+from src.datasets.text_dataset import make_text_dataloader
 
 from src.masks.utils import apply_masks
 from src.masks.block import TextMaskCollator
@@ -38,11 +38,10 @@ def main(args):
 
     # Load model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    encoder, predictor = init_model(device=device)
+    encoder, predictor = init_model(device=device, block_size=args.block_size)
     target_encoder = copy.deepcopy(encoder)
 
     mask_collator = TextMaskCollator()
-
 
     log_file = os.path.join(args.logging_folder, f'{args.tag}.csv')
     # -- make csv_logger
@@ -55,15 +54,13 @@ def main(args):
                            ('%d', 'time (ms)'))
 
     # Make data
-    train_loader, val_loader, sampler = make_text_dataset(
-        '../data/shakespeare/train.bin', 
-        '../data/shakespeare/val.bin', 
-        args.batch_size, 
-        mask_collator, 
-        training=True, 
-        drop_last=True
-        )
-    
+
+    data_dir = os.path.join('data', args.dataset)
+
+    train_loader = make_text_dataloader(os.path.join(data_dir, 'train.bin'), args.block_size, args.batch_size, args.mask_ratio, device_type='cuda')
+    val_loader = make_text_dataloader(os.path.join(data_dir, 'val.bin'), args.block_size, args.batch_size, args.mask_ratio, device_type='cuda')
+
+
     for p in target_encoder.parameters():
         p.requires_grad = False
 
@@ -131,9 +128,8 @@ def main(args):
                 return (texts, masks_1, masks_2)
             
             texts, masks_enc, masks_pred = load_texts()
-            maskA_meter.update(len(masks_enc[0][0]))
-            maskB_meter.update(len(masks_pred[0][0]))
-
+            maskA_meter.update(len(masks_enc[0]))
+            maskB_meter.update(len(masks_pred[0]))
             def train_step():
                 _new_lr = scheduler.step()
                 _new_wd = wd_scheduler.step()
@@ -145,13 +141,16 @@ def main(args):
 
                         h = apply_masks(h, masks_enc)
                         h = repeat_interleave_batch(h, B, repeat=len(masks_enc))
+                        return h
 
                 def forward_context():
                     z = encoder(texts, masks_enc)
+                    # import pdb; pdb.set_trace()
                     z = predictor(z, masks_enc, masks_pred)
                     return z
                 
                 def loss_fn(z, h):
+                    # import pdb; pdb.set_trace()
                     loss = torch.nn.functional.l1_loss(z, h)
                     return loss
             
@@ -172,9 +171,12 @@ def main(args):
                 optimizer.zero_grad()
 
                 with torch.no_grad():
-                    m = next(momentum_scheduler)
-                    for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
-                        param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
+                    try:
+                        m = next(momentum_scheduler)
+                        for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
+                            param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
+                    except StopIteration:
+                        pass
 
                 return (float(loss), _new_lr, _new_wd, grad_stats)
             (loss, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)
@@ -215,36 +217,6 @@ def main(args):
         logger.info('avg. loss %.3f' % loss_meter.avg)
         save_checkpoint(epoch+1)
 
-
-    # # Train loop
-    # for epoch in range(args.num_epochs):
-    #     for i, (input, target) in enumerate(train_loader):
-    #         # Move to device
-    #         input, target = input.to(device), target.to(device)
-
-    #         # Forward
-    #         encoded = encoder(input)
-    #         pred = predictor(encoded)
-
-    #         # Calculate loss
-    #         loss = compute_loss(pred, target)
-
-    #         # Backpropagate
-    #         optimizer.zero_grad()
-    #         loss.backward()
-    #         optimizer.step()
-
-    #         if i % args.log_interval == 0:
-    #             print(f"Epoch {epoch}, step {i}, loss {loss.item()}")
-
-    #     # Validate
-    #     val_loss = validate(val_loader, encoder, predictor)
-    #     print(f"Epoch {epoch}, validation loss {val_loss}")
-
-    #     # Save checkpoint
-    #     save_checkpoint(encoder, predictor, optimizer, path=args.checkpoint_path)
-
-
 if __name__ == "__main__":
     import argparse
 
@@ -253,9 +225,14 @@ if __name__ == "__main__":
     parser.add_argument('--start_epoch', type=int, default=0)
     parser.add_argument('--end_epoch', type=int, default=10)
 
+    parser.add_argument('--block_size', type=int, default=512)
+    parser.add_argument('--mask_ratio', type=float, default=0.4)
+
     parser.add_argument('--load_checkpoint', action='store_true')
-    parser.add_argument('--checkpoint_path', type=str, default='../checkpoints/shakespeare/pocket.pt')
-    parser.add_argument('--checkpoint_freq', type=int, default=10)
+    parser.add_argument('--checkpoint_path', type=str, default='checkpoints/shakespeare/pocket.pt')
+    parser.add_argument('--checkpoint_freq', type=int, default=2)
+
+    parser.add_argument('--dataset', type=str, default='shakespeare')
 
     parser.add_argument('--lr', type=float, default=1.0e-3)
     parser.add_argument('--start_lr', type=float, default=2.0e-3)
@@ -271,9 +248,10 @@ if __name__ == "__main__":
 
     parser.add_argument('--use_bfloat16', action='store_true')
 
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=1)
 
-    parser.add_argument('--logging_folder', type=str, default='../logs/shakespeare')
+    parser.add_argument('--logging_folder', type=str, default='logs/shakespeare')
+    parser.add_argument('--log_freq', type=int, default=10)
     parser.add_argument('--tag', type=str, default='pocket')
 
     parser.add_argument('--ema', type=list, default=[0.996, 1.0])
